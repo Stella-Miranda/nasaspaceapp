@@ -1,0 +1,912 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>NISAR Timeline Swipe & Gemini Change Detector</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      display: flex;
+      height: 100vh;
+      overflow: hidden;
+      background: #0f172a;
+      color: #f8fafc;
+    }
+
+    /* LEFT PANEL: 50% */
+    .left-pane {
+      width: 50%;
+      height: 100%;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid #334155;
+      background: #1e293b;
+    }
+    .header-controls {
+      padding: 12px 18px;
+      background: #0f172a;
+      border-bottom: 1px solid #334155;
+    }
+    .header-controls h2 { font-size: 1.1rem; margin-bottom: 8px; color: #38bdf8; }
+    .input-row { display: flex; gap: 6px; margin-bottom: 8px; flex-wrap: wrap; }
+    input[type="text"], select {
+      padding: 7px 9px;
+      border-radius: 6px;
+      border: 1px solid #475569;
+      background: #1e293b;
+      color: #fff;
+      font-family: monospace;
+      font-size: 0.82rem;
+    }
+    input[type="text"] { flex: 1; min-width: 155px; }
+    select { cursor: pointer; font-family: system-ui, sans-serif; font-weight: 600; color: #38bdf8; }
+
+    button {
+      padding: 7px 11px;
+      border: none;
+      border-radius: 6px;
+      background: #2563eb;
+      color: white;
+      font-weight: 600;
+      font-size: 0.82rem;
+      cursor: pointer;
+    }
+    button:hover { background: #1d4ed8; }
+    button:disabled { opacity: 0.4; cursor: not-allowed; }
+    button.secondary { background: #334155; }
+    button.secondary:hover { background: #475569; }
+    button.pick-active { background: #eab308; color: #0f172a; }
+    button.gemini-btn {
+      background: linear-gradient(135deg, #2563eb, #7c3aed);
+      color: #fff;
+    }
+    button.gemini-btn:hover { filter: brightness(1.1); }
+
+    /* Progress Bar */
+    .progress-wrap {
+      width: 100%;
+      background: #334155;
+      border-radius: 6px;
+      height: 6px;
+      overflow: hidden;
+      margin-bottom: 5px;
+    }
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: #38bdf8;
+      transition: width 0.25s ease;
+    }
+    #status { font-size: 0.78rem; color: #94a3b8; font-family: monospace; }
+
+    /* INTERACTIVE NODE TIMELINE TRACK */
+    .timeline-box {
+      padding: 12px 18px;
+      background: #162032;
+      border-bottom: 1px solid #334155;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .timeline-legend {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 0.8rem;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .pill-a { background: #0284c7; color: #fff; padding: 2px 8px; border-radius: 12px; font-weight: 700; }
+    .pill-b { background: #d97706; color: #fff; padding: 2px 8px; border-radius: 12px; font-weight: 700; }
+
+    /* Proportional Node Track */
+    .node-track-wrap {
+      position: relative;
+      height: 36px;
+      display: flex;
+      align-items: center;
+      margin: 0 10px;
+    }
+    .node-track-line {
+      position: absolute;
+      left: 0;
+      right: 0;
+      height: 4px;
+      background: #334155;
+      border-radius: 2px;
+    }
+    .node-track-span {
+      position: absolute;
+      height: 4px;
+      background: linear-gradient(90deg, #38bdf8, #f59e0b);
+      border-radius: 2px;
+    }
+    .timeline-node {
+      position: absolute;
+      transform: translateX(-50%);
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #475569;
+      border: 2px solid #94a3b8;
+      cursor: pointer;
+      transition: transform 0.15s, background 0.15s;
+      z-index: 2;
+    }
+    .timeline-node:hover {
+      transform: translateX(-50%) scale(1.3);
+      border-color: #fff;
+    }
+    .timeline-node.node-a {
+      background: #38bdf8;
+      border-color: #fff;
+      width: 20px;
+      height: 20px;
+      z-index: 4;
+      box-shadow: 0 0 10px #38bdf8;
+    }
+    .timeline-node.node-b {
+      background: #f59e0b;
+      border-color: #fff;
+      width: 20px;
+      height: 20px;
+      z-index: 4;
+      box-shadow: 0 0 10px #f59e0b;
+    }
+    .timeline-endpoints {
+      display: flex;
+      justify-content: space-between;
+      font-size: 0.74rem;
+      color: #94a3b8;
+      font-family: monospace;
+    }
+
+    /* Opacity & Alignment Controls */
+    .overlay-controls {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      flex-wrap: wrap;
+      padding: 8px 18px;
+      background: #0f172a;
+      border-bottom: 1px solid #334155;
+      font-size: 0.78rem;
+    }
+    .nudge-group { display: flex; align-items: center; gap: 3px; }
+    .nudge-group button { padding: 4px 7px; font-size: 0.75rem; }
+
+    /* Scrollable Area: Gemini Output + Node Cards */
+    .scroll-body {
+      flex: 1;
+      overflow-y: auto;
+      padding: 12px 18px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    /* Gemini Analysis Card */
+    #geminiPanel {
+      display: none;
+      background: #0f172a;
+      border: 1px solid #7c3aed;
+      border-radius: 8px;
+      padding: 12px 14px;
+      font-size: 0.85rem;
+      line-height: 1.5;
+      color: #e2e8f0;
+    }
+    #geminiPanel h3 {
+      color: #c4b5fd;
+      font-size: 0.92rem;
+      margin-bottom: 6px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+    #geminiText { white-space: pre-wrap; }
+
+    /* Node Cards */
+    #results { display: flex; flex-direction: column; gap: 8px; }
+    .card {
+      display: flex;
+      gap: 10px;
+      background: #0f172a;
+      border: 1px solid #334155;
+      border-radius: 8px;
+      padding: 8px;
+      align-items: center;
+    }
+    .card.is-a { border-color: #38bdf8; background: #0c2d48; }
+    .card.is-b { border-color: #f59e0b; background: #2d1f0c; }
+    .card img {
+      width: 72px;
+      height: 72px;
+      object-fit: cover;
+      border-radius: 6px;
+      background: #020617;
+      flex-shrink: 0;
+    }
+    .card-info { flex: 1; display: flex; flex-direction: column; gap: 4px; overflow: hidden; }
+    .badges { display: flex; gap: 5px; flex-wrap: wrap; }
+    .badge { font-size: 0.7rem; padding: 2px 6px; border-radius: 4px; font-weight: 600; }
+    .badge-type { background: #4c1d95; color: #ddd6fe; }
+    .badge-full { background: #14532d; color: #86efac; }
+    .badge-partial { background: #78350f; color: #fcd34d; }
+    .badge-gap { background: #1e3a8a; color: #93c5fd; }
+    .card-title { font-size: 0.8rem; font-weight: 600; color: #f1f5f9; word-break: break-all; }
+    .card-actions { display: flex; flex-direction: column; gap: 4px; }
+    .card-actions button { padding: 4px 8px; font-size: 0.72rem; }
+
+    /* RIGHT PANEL: 50% Map + Swipe Divider */
+    .right-pane { width: 50%; height: 100%; position: relative; overflow: hidden; }
+    #map { width: 100%; height: 100%; }
+    .crosshair-cursor { cursor: crosshair !important; }
+    .leaflet-image-layer {
+      image-rendering: -webkit-optimize-contrast;
+      image-rendering: crisp-edges;
+    }
+
+    /* Map Swipe Bar */
+    #swipeDivider {
+      display: none;
+      position: absolute;
+      top: 0;
+      bottom: 0;
+      left: 50%;
+      width: 4px;
+      background: #facc15;
+      z-index: 900;
+      cursor: ew-resize;
+      box-shadow: 0 0 10px rgba(0,0,0,0.8);
+    }
+    #swipeHandle {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      background: #facc15;
+      color: #0f172a;
+      font-weight: 800;
+      font-size: 0.75rem;
+      padding: 6px 10px;
+      border-radius: 20px;
+      white-space: nowrap;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.6);
+      user-select: none;
+    }
+    #swipeBadges {
+      display: none;
+      position: absolute;
+      bottom: 18px;
+      left: 14px;
+      right: 14px;
+      z-index: 900;
+      justify-content: space-between;
+      pointer-events: none;
+    }
+
+    #mapHint {
+      display: none;
+      position: absolute;
+      top: 14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 1000;
+      background: rgba(15, 23, 42, 0.92);
+      color: #facc15;
+      border: 1px solid #facc15;
+      padding: 8px 16px;
+      border-radius: 20px;
+      font-size: 0.85rem;
+      font-weight: 600;
+      pointer-events: none;
+    }
+  </style>
+</head>
+<body>
+
+  <!-- LEFT 50% -->
+  <div class="left-pane">
+    <div class="header-controls">
+      <h2>NISAR Timeline Swipe & Gemini Change AI</h2>
+      <div class="input-row">
+        <select id="productSelect" onchange="startSearch()" title="Select NISAR Image Product">
+          <option value="GCOV" selected>GCOV (Geocoded Covariance)</option>
+          <option value="GUNW">GUNW (Interferogram)</option>
+          <option value="GSLC">GSLC (Geocoded SLC)</option>
+          <option value="RSLC">RSLC (Slant-Range SLC)</option>
+          <option value="GOFF">GOFF (Pixel Offsets)</option>
+          <option value="ALL">ALL (All Types)</option>
+        </select>
+        <input id="bbox" type="text" value="117.5,13.5,118.2,14.2" title="lon_min, lat_min, lon_max, lat_max">
+        <button id="pickBtn" class="secondary" onclick="togglePickMode()">Pick 2 Points</button>
+        <button onclick="startSearch()">Search</button>
+        <button class="secondary" onclick="zoomToUserBox()">Focus</button>
+      </div>
+      <div class="progress-wrap"><div id="bar" class="progress-bar"></div></div>
+      <div id="status">Pick a region & click Search to load all timeline nodes.</div>
+    </div>
+
+    <!-- Interactive Node Timeline -->
+    <div class="timeline-box" id="timelineBox">
+      <div class="timeline-legend">
+        <div>
+          <span class="pill-a" id="labelA">A (Before): --</span>
+          &nbsp;vs&nbsp;
+          <span class="pill-b" id="labelB">B (After): --</span>
+        </div>
+        <button class="gemini-btn" id="geminiBtn" onclick="analyzeChangesWithGemini()">Analyze Changes with Gemini</button>
+      </div>
+
+      <div class="node-track-wrap" id="nodeTrack">
+        <div class="node-track-line"></div>
+        <div class="node-track-span" id="nodeTrackSpan"></div>
+        <!-- Nodes injected dynamically -->
+      </div>
+
+      <div class="timeline-endpoints">
+        <span id="firstDateLabel">First: --</span>
+        <span style="color:#cbd5e1;">Click any node on the line to set A or B</span>
+        <span id="lastDateLabel">Last: --</span>
+      </div>
+    </div>
+
+    <!-- Opacity & Manual Position Alignment -->
+    <div class="overlay-controls">
+      <div>
+        <span>Opacity: <strong id="opacityVal">85%</strong></span>
+        <input type="range" id="opacitySlider" min="0" max="100" value="85" style="width:85px; vertical-align:middle;" oninput="updateOpacity(this.value)">
+      </div>
+    <!-- HH / HV / VH Polarimetric Color Legend -->
+    <div style="display:flex; gap:12px; flex-wrap:wrap; padding:6px 18px; background:#162032; border-bottom:1px solid #334155; font-size:0.74rem; color:#cbd5e1;">
+      <span><strong style="color:#f472b6;">■ Magenta (HH/VV Co-Pol):</strong> Wet soil, flooded stems, urban</span>
+      <span><strong style="color:#4ade80;">■ Green (HV/VH Cross-Pol):</strong> Dense canopy &amp; crops</span>
+      <span><strong style="color:#94a3b8;">■ Black (Low Backscatter):</strong> Calm open water</span>
+    </div>
+      <div class="nudge-group" title="Align radar layers onto coastline (Shift + Arrow Keys)">
+        <span>Align:</span>
+        <select id="alignTarget" style="padding:3px 6px; font-size:0.75rem;">
+          <option value="BOTH">Both A & B</option>
+          <option value="A">Only A</option>
+          <option value="B">Only B</option>
+        </select>
+        <button class="secondary" onclick="nudgeOverlay(0, 1)">↑</button>
+        <button class="secondary" onclick="nudgeOverlay(0, -1)">↓</button>
+        <button class="secondary" onclick="nudgeOverlay(-1, 0)">←</button>
+        <button class="secondary" onclick="nudgeOverlay(1, 0)">→</button>
+        <button class="secondary" onclick="scaleOverlay(-0.01)">-</button>
+        <button class="secondary" onclick="scaleOverlay(0.01)">+</button>
+        <button class="secondary" onclick="resetAlignment()">Reset</button>
+      </div>
+    </div>
+
+    <div class="scroll-body">
+      <div id="geminiPanel">
+        <h3>Gemini Satellite Change Report</h3>
+        <div id="geminiText">Analyzing...</div>
+      </div>
+      <div id="results"></div>
+    </div>
+  </div>
+
+  <!-- RIGHT 50% -->
+  <div class="right-pane" id="rightPane">
+    <div id="mapHint">Click 1st corner on the map</div>
+    <div id="swipeDivider"><div id="swipeHandle">◀ A | B ▶</div></div>
+    <div id="swipeBadges">
+      <span class="pill-a" id="mapBadgeA">Before (A)</span>
+      <span class="pill-b" id="mapBadgeB">After (B)</span>
+    </div>
+    <div id="map"></div>
+  </div>
+
+  <script>
+    const darkMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+      attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19
+    });
+    const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+      attribution: 'Tiles &copy; Esri', maxZoom: 19
+    });
+
+    const map = L.map('map', {
+      center: [13.85, 117.85],
+      zoom: 9,
+      layers: [satelliteMap]
+    });
+    L.control.layers({ "Satellite": satelliteMap, "Dark Map": darkMap }).addTo(map);
+
+    let userBoxLayer = null;
+    let layerA = null;
+    let layerB = null;
+    let evtSource = null;
+    let currentGranules = [];
+    let idxA = 0;
+    let idxB = 0;
+    let nextClickSetsA = true;
+    let swipeRatio = 0.5; // 0.0 to 1.0 across map width
+
+    // Per-granule alignment offsets
+    let granuleOffsets = {};
+
+    function getOffset(idx) {
+      if (!granuleOffsets[idx]) {
+        granuleOffsets[idx] = { dLat: 0, dLon: 0, scale: 1.0 };
+      }
+      return granuleOffsets[idx];
+    }
+
+    function nudgeOverlay(dirX, dirY) {
+      if (currentGranules.length === 0) return;
+      const target = document.getElementById('alignTarget').value;
+      const step = 0.015 * Math.pow(2, 9 - map.getZoom());
+
+      const targets = target === 'BOTH' ? [idxA, idxB] : (target === 'A' ? [idxA] : [idxB]);
+      [...new Set(targets)].forEach(i => {
+        const off = getOffset(i);
+        off.dLon += dirX * step;
+        off.dLat += dirY * step;
+      });
+      applyOverlayBounds();
+    }
+
+    function scaleOverlay(delta) {
+      if (currentGranules.length === 0) return;
+      const target = document.getElementById('alignTarget').value;
+      const targets = target === 'BOTH' ? [idxA, idxB] : (target === 'A' ? [idxA] : [idxB]);
+      [...new Set(targets)].forEach(i => {
+        const off = getOffset(i);
+        off.scale = Math.max(0.7, Math.min(1.3, off.scale + delta));
+      });
+      applyOverlayBounds();
+    }
+
+    function resetAlignment() {
+      granuleOffsets[idxA] = { dLat: 0, dLon: 0, scale: 1.0 };
+      granuleOffsets[idxB] = { dLat: 0, dLon: 0, scale: 1.0 };
+      applyOverlayBounds();
+    }
+
+    function computeAdjustedBounds(footprint, idx) {
+      const lats = footprint.map(p => p[0]);
+      const lons = footprint.map(p => p[1]);
+      const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+      const minLon = Math.min(...lons), maxLon = Math.max(...lons);
+
+      const off = getOffset(idx);
+      const cLat = (minLat + maxLat) / 2 + off.dLat;
+      const cLon = (minLon + maxLon) / 2 + off.dLon;
+      const halfH = ((maxLat - minLat) / 2) * off.scale;
+      const halfW = ((maxLon - minLon) / 2) * off.scale;
+
+      return [[cLat - halfH, cLon - halfW], [cLat + halfH, cLon + halfW]];
+    }
+
+    function applyOverlayBounds() {
+      if (layerA && currentGranules[idxA]) {
+        layerA.setBounds(computeAdjustedBounds(currentGranules[idxA].footprint, idxA));
+      }
+      if (layerB && currentGranules[idxB]) {
+        layerB.setBounds(computeAdjustedBounds(currentGranules[idxB].footprint, idxB));
+      }
+      updateSwipeClip();
+    }
+
+    // --- SWIPE CLIPPING ENGINE ---
+    function updateSwipeClip() {
+      const rightPane = document.getElementById('rightPane');
+      const divider = document.getElementById('swipeDivider');
+      const badges = document.getElementById('swipeBadges');
+
+      if (!layerA || !layerB || idxA === idxB) {
+        divider.style.display = 'none';
+        badges.style.display = 'none';
+        if (layerA && layerA.getElement()) layerA.getElement().style.clipPath = 'none';
+        if (layerB && layerB.getElement()) layerB.getElement().style.clipPath = 'none';
+        return;
+      }
+
+      divider.style.display = 'block';
+      badges.style.display = 'flex';
+      const paneWidth = rightPane.clientWidth;
+      const splitX = paneWidth * swipeRatio;
+      divider.style.left = `${splitX}px`;
+
+      // Convert screen X coordinate of the divider into container layer points for each image
+      const elA = layerA.getElement();
+      const elB = layerB.getElement();
+
+      if (elA) {
+        const rectA = elA.getBoundingClientRect();
+        const paneRect = rightPane.getBoundingClientRect();
+        const cutA = Math.max(0, Math.min(rectA.width, (paneRect.left + splitX) - rectA.left));
+        // Keep left side of split for Node A
+        elA.style.clipPath = `inset(0px ${rectA.width - cutA}px 0px 0px)`;
+      }
+      if (elB) {
+        const rectB = elB.getBoundingClientRect();
+        const paneRect = rightPane.getBoundingClientRect();
+        const cutB = Math.max(0, Math.min(rectB.width, (paneRect.left + splitX) - rectB.left));
+        // Keep right side of split for Node B
+        elB.style.clipPath = `inset(0px 0px 0px ${cutB}px)`;
+      }
+    }
+
+    // Drag handler for the swipe divider
+    const swipeDivider = document.getElementById('swipeDivider');
+    let isDraggingSwipe = false;
+
+    swipeDivider.addEventListener('mousedown', (e) => {
+      e.stopPropagation();
+      isDraggingSwipe = true;
+      map.dragging.disable();
+    });
+
+    window.addEventListener('mousemove', (e) => {
+      if (!isDraggingSwipe) return;
+      const paneRect = document.getElementById('rightPane').getBoundingClientRect();
+      swipeRatio = Math.max(0.02, Math.min(0.98, (e.clientX - paneRect.left) / paneRect.width));
+      updateSwipeClip();
+    });
+
+    window.addEventListener('mouseup', () => {
+      if (isDraggingSwipe) {
+        isDraggingSwipe = false;
+        map.dragging.enable();
+      }
+    });
+
+    // Recompute clip whenever map pans or zooms
+    map.on('move zoom viewreset', updateSwipeClip);
+
+    // --- 2-CLICK RECTANGLE PICKER ---
+    let isPicking = false;
+    let firstPoint = null;
+    let firstMarker = null;
+    let previewRect = null;
+
+    function togglePickMode(forceState = null) {
+      isPicking = forceState !== null ? forceState : !isPicking;
+      const btn = document.getElementById('pickBtn');
+      const hint = document.getElementById('mapHint');
+      const mapEl = document.getElementById('map');
+
+      firstPoint = null;
+      if (firstMarker) { map.removeLayer(firstMarker); firstMarker = null; }
+      if (previewRect) { map.removeLayer(previewRect); previewRect = null; }
+
+      if (isPicking) {
+        btn.classList.add('pick-active');
+        btn.textContent = 'Cancel Pick';
+        mapEl.classList.add('crosshair-cursor');
+        hint.textContent = 'Click 1st corner on the map (Esc to cancel)';
+        hint.style.display = 'block';
+      } else {
+        btn.classList.remove('pick-active');
+        btn.textContent = 'Pick 2 Points';
+        mapEl.classList.remove('crosshair-cursor');
+        hint.style.display = 'none';
+      }
+    }
+
+    document.addEventListener('keydown', (e) => {
+      if (document.activeElement.tagName === 'INPUT' || document.activeElement.tagName === 'SELECT') return;
+      if (e.key.toLowerCase() === 'b') togglePickMode(true);
+      if (e.key === 'Escape' && isPicking) togglePickMode(false);
+      if (e.shiftKey && currentGranules.length > 0) {
+        if (e.key === 'ArrowUp') { e.preventDefault(); nudgeOverlay(0, 1); }
+        if (e.key === 'ArrowDown') { e.preventDefault(); nudgeOverlay(0, -1); }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); nudgeOverlay(-1, 0); }
+        if (e.key === 'ArrowRight') { e.preventDefault(); nudgeOverlay(1, 0); }
+      }
+    });
+
+    map.on('click', function(e) {
+      if (!isPicking) return;
+      if (!firstPoint) {
+        firstPoint = e.latlng;
+        firstMarker = L.circleMarker(firstPoint, {
+          radius: 6, color: '#facc15', fillColor: '#facc15', fillOpacity: 1
+        }).addTo(map);
+        document.getElementById('mapHint').textContent = 'Move mouse and click 2nd corner';
+      } else {
+        const secondPoint = e.latlng;
+        const lonMin = Math.min(firstPoint.lng, secondPoint.lng).toFixed(4);
+        const latMin = Math.min(firstPoint.lat, secondPoint.lat).toFixed(4);
+        const lonMax = Math.max(firstPoint.lng, secondPoint.lng).toFixed(4);
+        const latMax = Math.max(firstPoint.lat, secondPoint.lat).toFixed(4);
+        document.getElementById('bbox').value = `${lonMin},${latMin},${lonMax},${latMax}`;
+        togglePickMode(false);
+        startSearch();
+      }
+    });
+
+    map.on('mousemove', function(e) {
+      if (!isPicking || !firstPoint) return;
+      const bounds = L.latLngBounds(firstPoint, e.latlng);
+      if (!previewRect) {
+        previewRect = L.rectangle(bounds, {
+          color: '#facc15', weight: 2, dashArray: '4, 4', fillOpacity: 0.15, interactive: false
+        }).addTo(map);
+      } else {
+        previewRect.setBounds(bounds);
+      }
+    });
+
+    function drawUserBox() {
+      const parts = document.getElementById('bbox').value.split(',').map(Number);
+      if (parts.length !== 4 || parts.some(isNaN)) return null;
+      const [lonMin, latMin, lonMax, latMax] = parts;
+      const bounds = [[latMin, lonMin], [latMax, lonMax]];
+
+      if (userBoxLayer) map.removeLayer(userBoxLayer);
+      userBoxLayer = L.rectangle(bounds, {
+        color: '#facc15', weight: 2, dashArray: '6, 6', fillOpacity: 0.04
+      }).addTo(map);
+      return bounds;
+    }
+
+    function zoomToUserBox() {
+      const bounds = drawUserBox();
+      if (bounds) map.fitBounds(bounds, { padding: [30, 30] });
+    }
+
+    // --- SEARCH STREAM ---
+    function startSearch() {
+      if (evtSource) evtSource.close();
+      const bbox = document.getElementById('bbox').value.trim();
+      const product = document.getElementById('productSelect').value;
+      const bar = document.getElementById('bar');
+      const status = document.getElementById('status');
+      const resultsDiv = document.getElementById('results');
+
+      granuleOffsets = {};
+      zoomToUserBox();
+      bar.style.width = '5%';
+      bar.style.background = '#38bdf8';
+      status.textContent = `Searching ${product} occurrences...`;
+      resultsDiv.innerHTML = '';
+      document.getElementById('timelineBox').style.display = 'none';
+      document.getElementById('geminiPanel').style.display = 'none';
+
+      evtSource = new EventSource(`/search-stream?bbox=${encodeURIComponent(bbox)}&product=${encodeURIComponent(product)}`);
+
+      evtSource.onmessage = function(event) {
+        const msg = JSON.parse(event.data);
+        bar.style.width = msg.percent + '%';
+        status.textContent = `[${msg.percent}%] ${msg.message}`;
+
+        if (msg.step === 'done') {
+          evtSource.close();
+          currentGranules = msg.payload.granules || [];
+          renderResults(currentGranules);
+          if (currentGranules.length > 0) {
+            // Default: Node A = First occurrence (0), Node B = Last occurrence (len - 1)
+            idxA = 0;
+            idxB = currentGranules.length - 1;
+            nextClickSetsA = true;
+            buildVisualNodeTrack(currentGranules);
+            renderComparisonLayers();
+          }
+        } else if (msg.step === 'error') {
+          bar.style.background = '#ef4444';
+          evtSource.close();
+        }
+      };
+
+      evtSource.onerror = function() { evtSource.close(); };
+    }
+
+    // --- VISUAL PROPORTIONAL TIMELINE TRACK ---
+    function buildVisualNodeTrack(granules) {
+      const box = document.getElementById('timelineBox');
+      const track = document.getElementById('nodeTrack');
+      box.style.display = 'flex';
+
+      // Clear old nodes
+      track.querySelectorAll('.timeline-node').forEach(n => n.remove());
+
+      const firstMs = granules[0].timestamp_ms;
+      const lastMs = granules[granules.length - 1].timestamp_ms;
+      const totalSpan = Math.max(1, lastMs - firstMs);
+
+      document.getElementById('firstDateLabel').textContent = `First: ${granules[0].date_label}`;
+      document.getElementById('lastDateLabel').textContent = `Last: ${granules[granules.length - 1].date_label}`;
+
+      granules.forEach((g, idx) => {
+        const pct = granules.length === 1 ? 50 : ((g.timestamp_ms - firstMs) / totalSpan) * 100;
+        const dot = document.createElement('div');
+        dot.className = 'timeline-node';
+        dot.id = `tnode-${idx}`;
+        dot.style.left = `${pct}%`;
+        dot.title = `${g.date_label} (Day ${g.days_since_start} • ${g.overlap_pct}% overlap)`;
+
+        dot.onclick = () => {
+          // Clicking nodes alternates setting A (Before) and B (After)
+          if (nextClickSetsA) {
+            setNodeA(idx);
+          } else {
+            setNodeB(idx);
+          }
+          nextClickSetsA = !nextClickSetsA;
+        };
+
+        track.appendChild(dot);
+      });
+
+      updateNodeTrackHighlights();
+    }
+
+    function updateNodeTrackHighlights() {
+      const granules = currentGranules;
+      if (!granules.length) return;
+
+      const firstMs = granules[0].timestamp_ms;
+      const lastMs = granules[granules.length - 1].timestamp_ms;
+      const totalSpan = Math.max(1, lastMs - firstMs);
+
+      const pctA = granules.length === 1 ? 50 : ((granules[idxA].timestamp_ms - firstMs) / totalSpan) * 100;
+      const pctB = granules.length === 1 ? 50 : ((granules[idxB].timestamp_ms - firstMs) / totalSpan) * 100;
+
+      const spanEl = document.getElementById('nodeTrackSpan');
+      spanEl.style.left = `${Math.min(pctA, pctB)}%`;
+      spanEl.style.width = `${Math.abs(pctB - pctA)}%`;
+
+      granules.forEach((_, i) => {
+        const dot = document.getElementById(`tnode-${i}`);
+        if (dot) {
+          dot.classList.toggle('node-a', i === idxA);
+          dot.classList.toggle('node-b', i === idxB);
+        }
+        const card = document.getElementById(`card-${i}`);
+        if (card) {
+          card.classList.toggle('is-a', i === idxA);
+          card.classList.toggle('is-b', i === idxB);
+        }
+      });
+
+      document.getElementById('labelA').textContent = `A (Before): ${granules[idxA].date_label}`;
+      document.getElementById('labelB').textContent = `B (After): ${granules[idxB].date_label}`;
+      document.getElementById('mapBadgeA').textContent = `A: ${granules[idxA].date_label}`;
+      document.getElementById('mapBadgeB').textContent = `B: ${granules[idxB].date_label}`;
+    }
+
+    function setNodeA(idx) {
+      idxA = idx;
+      // Copy alignment offset from B if A hasn't been aligned yet
+      if (!granuleOffsets[idxA] && granuleOffsets[idxB]) {
+        granuleOffsets[idxA] = { ...granuleOffsets[idxB] };
+      }
+      updateNodeTrackHighlights();
+      renderComparisonLayers();
+    }
+
+    function setNodeB(idx) {
+      idxB = idx;
+      if (!granuleOffsets[idxB] && granuleOffsets[idxA]) {
+        granuleOffsets[idxB] = { ...granuleOffsets[idxA] };
+      }
+      updateNodeTrackHighlights();
+      renderComparisonLayers();
+    }
+
+    function renderComparisonLayers() {
+      if (layerA) map.removeLayer(layerA);
+      if (layerB) map.removeLayer(layerB);
+
+      const gA = currentGranules[idxA];
+      const gB = currentGranules[idxB];
+      const opacity = document.getElementById('opacitySlider').value / 100;
+
+      if (gA && gA.browse_image && gA.footprint) {
+        layerA = L.imageOverlay(gA.browse_image, computeAdjustedBounds(gA.footprint, idxA), {
+          opacity: opacity
+        }).addTo(map);
+        layerA.on('load', updateSwipeClip);
+      }
+
+      if (gB && gB.browse_image && gB.footprint && idxB !== idxA) {
+        layerB = L.imageOverlay(gB.browse_image, computeAdjustedBounds(gB.footprint, idxB), {
+          opacity: opacity
+        }).addTo(map);
+        layerB.on('load', updateSwipeClip);
+      } else {
+        layerB = null;
+      }
+
+      zoomToUserBox();
+      if (userBoxLayer) userBoxLayer.bringToFront();
+      setTimeout(updateSwipeClip, 80);
+    }
+
+    function renderResults(granules) {
+      const resultsDiv = document.getElementById('results');
+      if (granules.length === 0) {
+        resultsDiv.innerHTML = '<p style="color:#94a3b8;">No NISAR granules found for this product type in this box.</p>';
+        return;
+      }
+
+      resultsDiv.innerHTML = granules.map((g, idx) => {
+        const isFull = g.overlap_pct >= 98;
+        const typeBadge = `<span class="badge badge-type">${g.product_type}</span>`;
+        const overlapBadge = isFull
+          ? `<span class="badge badge-full">100% Overlap</span>`
+          : `<span class="badge badge-partial">${g.overlap_pct}% Overlap</span>`;
+        const gapBadge = idx === 0
+          ? `<span class="badge badge-gap">First (Day 0)</span>`
+          : `<span class="badge badge-gap">Day ${g.days_since_start} (+${g.days_since_prev}d)</span>`;
+        const polBadge = `<span class="badge" style="background:#0f766e; color:#ccfbf1;">${g.orbit_dir || 'Asc'} • ${g.pol_code || 'DHDH'}</span>`;
+        return `
+          <div class="card" id="card-${idx}">
+            <img src="${g.browse_image || ''}" alt="Preview" onerror="this.style.opacity=0.2">
+            <div class="card-info">
+              <div class="badges">${typeBadge} ${overlapBadge} ${gapBadge} ${polBadge}</div>
+              <div class="card-title">${g.date_label} — ${g.id}</div>
+            </div>
+            <div class="card-actions">
+              <button style="background:#0284c7;" onclick="setNodeA(${idx})">Set A</button>
+              <button style="background:#d97706;" onclick="setNodeB(${idx})">Set B</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function updateOpacity(val) {
+      document.getElementById('opacityVal').textContent = val + '%';
+      const op = val / 100;
+      if (layerA) layerA.setOpacity(op);
+      if (layerB) layerB.setOpacity(op);
+    }
+
+    // --- GEMINI CHANGE DETECTION CALL ---
+    async function analyzeChangesWithGemini() {
+      if (currentGranules.length < 2) {
+        alert("Need at least two timeline nodes to compare.");
+        return;
+      }
+      const btn = document.getElementById('geminiBtn');
+      const panel = document.getElementById('geminiPanel');
+      const textEl = document.getElementById('geminiText');
+
+      const bboxParts = document.getElementById('bbox').value.split(',').map(Number);
+      btn.disabled = true;
+      btn.textContent = "Analyzing with Gemini...";
+      panel.style.display = 'block';
+      textEl.textContent = `Cropping aligned area for ${currentGranules[idxA].date_label} (A) and ${currentGranules[idxB].date_label} (B), then sending to Gemini...`;
+
+      try {
+        const resp = await fetch('/analyze-change', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            nodeA: currentGranules[idxA],
+            nodeB: currentGranules[idxB],
+            offsetA: getOffset(idxA),
+            offsetB: getOffset(idxB),
+            bbox: bboxParts
+          })
+        });
+        const data = await resp.json();
+        if (data.error) {
+          textEl.textContent = `Error: ${data.error}`;
+        } else {
+          textEl.textContent = data.analysis;
+        }
+      } catch (err) {
+        textEl.textContent = `Request failed: ${err.message}`;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Analyze Changes with Gemini";
+      }
+    }
+
+    zoomToUserBox();
+  </script>
+</body>
+</html>
