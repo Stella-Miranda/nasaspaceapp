@@ -67,14 +67,25 @@ def fetch_cached_image(url):
     return img
 
 def pick_lowest_res_browse(links):
-    """Grabs the first standard browse image from CMR (just like the original version)."""
+    """Picks the smallest, fastest-loading low-resolution browse thumbnail."""
+    candidates = []
     for link in links:
         href = link.get("href", "")
         rel = link.get("rel", "")
-        if "browse#" in rel and href.lower().endswith((".png", ".jpg", ".jpeg")):
-            if "thumb" not in href.lower():
-                return href
-    return None
+        if "browse#" in rel and href.lower().endswith((".jpg", ".jpeg", ".png")):
+            score = 0
+            lower = href.lower()
+            if "thumb" in lower or "small" in lower or "low" in lower:
+                score += 20
+            if lower.endswith((".jpg", ".jpeg")):
+                score += 10
+            if "high" in lower or "full" in lower or "large" in lower:
+                score -= 20
+            candidates.append((score, href))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
 
 def get_footprint_bounds(footprint):
     lats = [p[0] for p in footprint]
