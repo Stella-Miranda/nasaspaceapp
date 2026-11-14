@@ -248,8 +248,8 @@
     #map { width: 100%; height: 100%; }
     .crosshair-cursor { cursor: crosshair !important; }
     .leaflet-image-layer {
-      image-rendering: -webkit-optimize-contrast;
-      image-rendering: crisp-edges;
+      image-rendering: auto;
+      filter: blur(0.3px);
     }
 
     /* Map Swipe Bar */
@@ -408,18 +408,32 @@
 
   <script>
     const darkMap = L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
-      attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19
+      attribution: '&copy; OpenStreetMap &copy; CARTO', maxZoom: 19, noWrap: true
     });
     const satelliteMap = L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
-      attribution: 'Tiles &copy; Esri', maxZoom: 19
+      attribution: 'Tiles &copy; Esri', maxZoom: 19, noWrap: true
     });
+
+    const worldBounds = L.latLngBounds(L.latLng(-85, -180), L.latLng(85, 180));
 
     const map = L.map('map', {
       center: [13.85, 117.85],
       zoom: 9,
+      minZoom: 3,
+      maxZoom: 12,               // Stops zooming in before pixels turn into giant squares
+      maxBounds: worldBounds,    // Stops panning infinitely left/right to lng 1000
+      maxBoundsViscosity: 1.0,
       layers: [satelliteMap]
     });
     L.control.layers({ "Satellite": satelliteMap, "Dark Map": darkMap }).addTo(map);
+
+    // Coordinate safety helpers (keeps longitudes in [-180, 180] and latitudes in [-85, 85])
+    function wrapLng(lng) {
+      return L.Util.wrapNum(lng, [-180, 180], true);
+    }
+    function clampLat(lat) {
+      return Math.max(-85, Math.min(85, lat));
+    }
 
     let userBoxLayer = null;
     let layerA = null;
@@ -429,7 +443,7 @@
     let idxA = 0;
     let idxB = 0;
     let nextClickSetsA = true;
-    let swipeRatio = 0.5; // 0.0 to 1.0 across map width
+    let swipeRatio = 0.5;
 
     // Per-granule alignment offsets
     let granuleOffsets = {};
@@ -517,7 +531,6 @@
       const splitX = paneWidth * swipeRatio;
       divider.style.left = `${splitX}px`;
 
-      // Convert screen X coordinate of the divider into container layer points for each image
       const elA = layerA.getElement();
       const elB = layerB.getElement();
 
@@ -525,19 +538,16 @@
         const rectA = elA.getBoundingClientRect();
         const paneRect = rightPane.getBoundingClientRect();
         const cutA = Math.max(0, Math.min(rectA.width, (paneRect.left + splitX) - rectA.left));
-        // Keep left side of split for Node A
         elA.style.clipPath = `inset(0px ${rectA.width - cutA}px 0px 0px)`;
       }
       if (elB) {
         const rectB = elB.getBoundingClientRect();
         const paneRect = rightPane.getBoundingClientRect();
         const cutB = Math.max(0, Math.min(rectB.width, (paneRect.left + splitX) - rectB.left));
-        // Keep right side of split for Node B
         elB.style.clipPath = `inset(0px 0px 0px ${cutB}px)`;
       }
     }
 
-    // Drag handler for the swipe divider
     const swipeDivider = document.getElementById('swipeDivider');
     let isDraggingSwipe = false;
 
@@ -561,7 +571,6 @@
       }
     });
 
-    // Recompute clip whenever map pans or zooms
     map.on('move zoom viewreset', updateSwipeClip);
 
     // --- 2-CLICK RECTANGLE PICKER ---
@@ -609,17 +618,18 @@
     map.on('click', function(e) {
       if (!isPicking) return;
       if (!firstPoint) {
-        firstPoint = e.latlng;
+        firstPoint = L.latLng(clampLat(e.latlng.lat), wrapLng(e.latlng.lng));
         firstMarker = L.circleMarker(firstPoint, {
           radius: 6, color: '#facc15', fillColor: '#facc15', fillOpacity: 1
         }).addTo(map);
         document.getElementById('mapHint').textContent = 'Move mouse and click 2nd corner';
       } else {
-        const secondPoint = e.latlng;
-        const lonMin = Math.min(firstPoint.lng, secondPoint.lng).toFixed(4);
-        const latMin = Math.min(firstPoint.lat, secondPoint.lat).toFixed(4);
-        const lonMax = Math.max(firstPoint.lng, secondPoint.lng).toFixed(4);
-        const latMax = Math.max(firstPoint.lat, secondPoint.lat).toFixed(4);
+        const lon1 = wrapLng(firstPoint.lng), lat1 = clampLat(firstPoint.lat);
+        const lon2 = wrapLng(e.latlng.lng), lat2 = clampLat(e.latlng.lat);
+        const lonMin = Math.min(lon1, lon2).toFixed(4);
+        const latMin = Math.min(lat1, lat2).toFixed(4);
+        const lonMax = Math.max(lon1, lon2).toFixed(4);
+        const latMax = Math.max(lat1, lat2).toFixed(4);
         document.getElementById('bbox').value = `${lonMin},${latMin},${lonMax},${latMax}`;
         togglePickMode(false);
         startSearch();
@@ -628,7 +638,8 @@
 
     map.on('mousemove', function(e) {
       if (!isPicking || !firstPoint) return;
-      const bounds = L.latLngBounds(firstPoint, e.latlng);
+      const curPt = L.latLng(clampLat(e.latlng.lat), wrapLng(e.latlng.lng));
+      const bounds = L.latLngBounds(firstPoint, curPt);
       if (!previewRect) {
         previewRect = L.rectangle(bounds, {
           color: '#facc15', weight: 2, dashArray: '4, 4', fillOpacity: 0.15, interactive: false
@@ -641,7 +652,15 @@
     function drawUserBox() {
       const parts = document.getElementById('bbox').value.split(',').map(Number);
       if (parts.length !== 4 || parts.some(isNaN)) return null;
-      const [lonMin, latMin, lonMax, latMax] = parts;
+      let [lonMin, latMin, lonMax, latMax] = parts;
+      lonMin = wrapLng(lonMin);
+      lonMax = wrapLng(lonMax);
+      latMin = clampLat(latMin);
+      latMax = clampLat(latMax);
+      if (lonMin > lonMax) [lonMin, lonMax] = [lonMax, lonMin];
+      if (latMin > latMax) [latMin, latMax] = [latMax, latMin];
+
+      document.getElementById('bbox').value = `${lonMin.toFixed(4)},${latMin.toFixed(4)},${lonMax.toFixed(4)},${latMax.toFixed(4)}`;
       const bounds = [[latMin, lonMin], [latMax, lonMax]];
 
       if (userBoxLayer) map.removeLayer(userBoxLayer);
@@ -653,12 +672,14 @@
 
     function zoomToUserBox() {
       const bounds = drawUserBox();
-      if (bounds) map.fitBounds(bounds, { padding: [30, 30] });
+      if (bounds) map.fitBounds(bounds, { padding: [30, 30], maxZoom: 12 });
     }
 
     // --- SEARCH STREAM ---
     function startSearch() {
       if (evtSource) evtSource.close();
+      zoomToUserBox();
+
       const bbox = document.getElementById('bbox').value.trim();
       const product = document.getElementById('productSelect').value;
       const bar = document.getElementById('bar');
@@ -666,7 +687,6 @@
       const resultsDiv = document.getElementById('results');
 
       granuleOffsets = {};
-      zoomToUserBox();
       bar.style.width = '5%';
       bar.style.background = '#38bdf8';
       status.textContent = `Searching ${product} occurrences...`;
@@ -686,7 +706,6 @@
           currentGranules = msg.payload.granules || [];
           renderResults(currentGranules);
           if (currentGranules.length > 0) {
-            // Default: Node A = First occurrence (0), Node B = Last occurrence (len - 1)
             idxA = 0;
             idxB = currentGranules.length - 1;
             nextClickSetsA = true;
@@ -708,7 +727,6 @@
       const track = document.getElementById('nodeTrack');
       box.style.display = 'flex';
 
-      // Clear old nodes
       track.querySelectorAll('.timeline-node').forEach(n => n.remove());
 
       const firstMs = granules[0].timestamp_ms;
@@ -727,7 +745,6 @@
         dot.title = `${g.date_label} (Day ${g.days_since_start} • ${g.overlap_pct}% overlap)`;
 
         dot.onclick = () => {
-          // Clicking nodes alternates setting A (Before) and B (After)
           if (nextClickSetsA) {
             setNodeA(idx);
           } else {
@@ -778,7 +795,6 @@
 
     function setNodeA(idx) {
       idxA = idx;
-      // Copy alignment offset from B if A hasn't been aligned yet
       if (!granuleOffsets[idxA] && granuleOffsets[idxB]) {
         granuleOffsets[idxA] = { ...granuleOffsets[idxB] };
       }
@@ -834,18 +850,19 @@
       resultsDiv.innerHTML = granules.map((g, idx) => {
         const isFull = g.overlap_pct >= 98;
         const typeBadge = `<span class="badge badge-type">${g.product_type}</span>`;
+        const polBadge = `<span class="badge" style="background:#0f766e; color:#ccfbf1;">${g.orbit_dir || 'Asc'} • ${g.pol_code || 'DHDH'}</span>`;
         const overlapBadge = isFull
           ? `<span class="badge badge-full">100% Overlap</span>`
           : `<span class="badge badge-partial">${g.overlap_pct}% Overlap</span>`;
         const gapBadge = idx === 0
           ? `<span class="badge badge-gap">First (Day 0)</span>`
           : `<span class="badge badge-gap">Day ${g.days_since_start} (+${g.days_since_prev}d)</span>`;
-        const polBadge = `<span class="badge" style="background:#0f766e; color:#ccfbf1;">${g.orbit_dir || 'Asc'} • ${g.pol_code || 'DHDH'}</span>`;
+
         return `
           <div class="card" id="card-${idx}">
             <img src="${g.browse_image || ''}" alt="Preview" onerror="this.style.opacity=0.2">
             <div class="card-info">
-              <div class="badges">${typeBadge} ${overlapBadge} ${gapBadge} ${polBadge}</div>
+              <div class="badges">${typeBadge} ${polBadge} ${overlapBadge} ${gapBadge}</div>
               <div class="card-title">${g.date_label} — ${g.id}</div>
             </div>
             <div class="card-actions">
@@ -878,7 +895,7 @@
       btn.disabled = true;
       btn.textContent = "Analyzing with Gemini...";
       panel.style.display = 'block';
-      textEl.textContent = `Cropping aligned area for ${currentGranules[idxA].date_label} (A) and ${currentGranules[idxB].date_label} (B), then sending to Gemini...`;
+      textEl.textContent = `Analyzing HH/HV/VH shifts between ${currentGranules[idxA].date_label} (A) and ${currentGranules[idxB].date_label} (B)...`;
 
       try {
         const resp = await fetch('/analyze-change', {
