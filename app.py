@@ -2,8 +2,8 @@ import io
 import json
 import os
 import time
+from collections import OrderedDict
 from datetime import datetime
-from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import requests
 from PIL import Image
@@ -13,7 +13,6 @@ from google.genai import types
 
 app = Flask(__name__)
 
-# Uses environment variable on Render/GitHub, falls back to your key locally
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6JUeazRiSan95etivoS4DXr0UIqvl7c90TeM4qvI7T4Tw")
 gemini_client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -23,7 +22,27 @@ GEMINI_MODELS = [
     "gemini-2.0-flash",
 ]
 
-IMAGE_CACHE = {}
+# Bounded LRU Caches so Render's 512MB RAM never overflows
+class BoundedCache(OrderedDict):
+    def __init__(self, maxsize=20):
+        super().__init__()
+        self.maxsize = maxsize
+
+    def get_item(self, key):
+        if key not in self:
+            return None
+        self.move_to_end(key)
+        return self[key]
+
+    def set_item(self, key, value):
+        if key in self:
+            self.move_to_end(key)
+        self[key] = value
+        if len(self) > self.maxsize:
+            self.popitem(last=False)
+
+IMAGE_CACHE = BoundedCache(maxsize=16)
+CMR_CACHE = BoundedCache(maxsize=30)
 
 PRODUCT_COLLECTIONS = {
     "GCOV": ["NISAR_L2_GCOV_PROVISIONAL_V1", "NISAR_L2_GCOV_BETA_V1"],
@@ -50,20 +69,19 @@ POLARIZATION_LABELS = {
 }
 
 def send_event(step, percent, message, payload=None):
-    print(f"[{percent}%] {step}: {message}", flush=True)
     return f"data: {json.dumps({'step': step, 'percent': percent, 'message': message, 'payload': payload})}\n\n"
 
 def normalize_lon(lon):
-    """Wraps any longitude (e.g., 1000 or -540) cleanly into [-180, 180]."""
     return ((lon + 180.0) % 360.0) - 180.0
 
 def fetch_cached_image(url):
-    if url in IMAGE_CACHE:
-        return IMAGE_CACHE[url]
-    resp = requests.get(url, timeout=10)
+    cached = IMAGE_CACHE.get_item(url)
+    if cached is not None:
+        return cached
+    resp = requests.get(url, timeout=8)
     resp.raise_for_status()
     img = Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    IMAGE_CACHE[url] = img
+    IMAGE_CACHE.set_item(url, img)
     return img
 
 def pick_lowest_res_browse(links):
@@ -87,47 +105,62 @@ def pick_lowest_res_browse(links):
     candidates.sort(key=lambda x: x[0], reverse=True)
     return candidates[0][1]
 
-def get_footprint_bounds(footprint):
-    lats = [p[0] for p in footprint]
-    lons = [p[1] for p in footprint]
-    return min(lons), min(lats), max(lons), max(lats)
-
 def parse_granule_metadata(title):
     parts = title.split("_")
     orbit_dir = "Ascending" if "_A_" in title else ("Descending" if "_D_" in title else "Unknown")
     pol_code = next((p for p in parts if p in POLARIZATION_LABELS), "DHDH")
-    pol_desc = POLARIZATION_LABELS.get(pol_code, pol_code)
     return {
         "orbit_dir": orbit_dir,
         "pol_code": pol_code,
-        "pol_desc": pol_desc,
+        "pol_desc": POLARIZATION_LABELS.get(pol_code, pol_code),
     }
 
-def measure_true_radar_pixel_coverage(bbox, footprint, browse_url):
+def point_in_polygon(lat, lon, poly):
+    inside = False
+    n = len(poly)
+    if n < 3:
+        return False
+    p1_lat, p1_lon = poly[0]
+    for i in range(1, n + 1):
+        p2_lat, p2_lon = poly[i % n]
+        if lon > min(p1_lon, p2_lon):
+            if lon <= max(p1_lon, p2_lon):
+                if lat <= max(p1_lat, p2_lat):
+                    if p1_lon != p2_lon:
+                        xinters = (lon - p1_lon) * (p2_lat - p1_lat) / (p2_lon - p1_lon) + p1_lat
+                    if p1_lat == p2_lat or lat <= xinters:
+                        inside = not inside
+        p1_lat, p1_lon = p2_lat, p2_lon
+    return inside
+
+def fast_swath_overlap_pct(bbox, footprint):
+    """
+    Instant 0-byte geometric overlap check:
+    Shrinks the outer footprint polygon slightly toward its centroid so transparent
+    corner padding isn't counted as valid radar coverage—no image download needed!
+    """
     if not footprint or len(footprint) < 3:
         return 0
-    u_lon_min, u_lat_min, u_lon_max, u_lat_max = bbox
-    f_lon_min, f_lat_min, f_lon_max, f_lat_max = get_footprint_bounds(footprint)
 
-    try:
-        img = fetch_cached_image(browse_url)
-        w, h = img.size
-        x0 = int(round(((u_lon_min - f_lon_min) / max(1e-9, f_lon_max - f_lon_min)) * w))
-        x1 = int(round(((u_lon_max - f_lon_min) / max(1e-9, f_lon_max - f_lon_min)) * w))
-        y0 = int(round(((f_lat_max - u_lat_max) / max(1e-9, f_lat_max - f_lat_min)) * h))
-        y1 = int(round(((f_lat_max - u_lat_min) / max(1e-9, f_lat_max - f_lat_min)) * h))
+    c_lat = sum(p[0] for p in footprint) / len(footprint)
+    c_lon = sum(p[1] for p in footprint) / len(footprint)
 
-        cx0, cx1 = max(0, x0), min(w, max(x0 + 1, x1))
-        cy0, cy1 = max(0, y0), min(h, max(y0 + 1, y1))
-        if cx1 <= cx0 or cy1 <= cy0:
-            return 0
+    # 0.88 shrink factor trims the empty transparent corner triangles of tilted swaths
+    inner_poly = [
+        [c_lat + (p[0] - c_lat) * 0.88, c_lon + (p[1] - c_lon) * 0.88]
+        for p in footprint
+    ]
 
-        total_box_px = max(1, (x1 - x0) * (y1 - y0))
-        cropped_alpha = img.crop((cx0, cy0, cx1, cy1)).getchannel("A")
-        valid_pixels = sum(1 for a in cropped_alpha.getdata() if a > 10)
-        return min(100, max(0, int(round((valid_pixels / total_box_px) * 100))))
-    except Exception:
-        return 0
+    lon_min, lat_min, lon_max, lat_max = bbox
+    steps = 4  # 16 sample points across user box
+    hits = 0
+    for i in range(steps):
+        lat = lat_min + (lat_max - lat_min) * (i / (steps - 1))
+        for j in range(steps):
+            lon = lon_min + (lon_max - lon_min) * (j / (steps - 1))
+            if point_in_polygon(lat, lon, inner_poly):
+                hits += 1
+    return int(round((hits / (steps * steps)) * 100))
 
 def parse_iso_date(date_str):
     try:
@@ -135,11 +168,11 @@ def parse_iso_date(date_str):
     except Exception:
         return None
 
-def build_timeline_nodes(granules, min_days_apart=12, max_nodes=18):
+def build_timeline_nodes(granules, min_days_apart=12, max_nodes=16):
     if not granules:
         return []
-    full_cover = [g for g in granules if g["overlap_pct"] >= 98]
-    partial_cover = [g for g in granules if 50 <= g["overlap_pct"] < 98]
+    full_cover = [g for g in granules if g["overlap_pct"] >= 90]
+    partial_cover = [g for g in granules if 50 <= g["overlap_pct"] < 90]
     pool = full_cover if len(full_cover) >= 2 else (
         full_cover + partial_cover if len(full_cover + partial_cover) >= 2 else granules
     )
@@ -195,12 +228,12 @@ def crop_aligned_region(browse_url, footprint, user_bbox, offset):
     y1 = max(y0 + 1, min(h, int(round(((adj_max_lat - u_lat_min) / max(1e-9, adj_max_lat - adj_min_lat)) * h))))
 
     cropped = img.crop((x0, y0, x1, y1)).convert("RGB")
-    if cropped.width < 512 or cropped.height < 512:
-        ratio = 512 / max(cropped.width, cropped.height)
-        cropped = cropped.resize((int(cropped.width * ratio), int(cropped.height * ratio)), Image.Resampling.LANCZOS)
+    if cropped.width < 384 or cropped.height < 384:
+        ratio = 384 / max(cropped.width, cropped.height)
+        cropped = cropped.resize((int(cropped.width * ratio), int(cropped.height * ratio)), Image.Resampling.BILINEAR)
 
     buf = io.BytesIO()
-    cropped.save(buf, format="PNG")
+    cropped.save(buf, format="JPEG", quality=85)
     return buf.getvalue()
 
 def compute_hh_hv_stats(img_a_bytes, img_b_bytes):
@@ -245,6 +278,7 @@ def analyze_change():
         return jsonify({'error': 'Select two timeline nodes (A and B) first.'}), 400
 
     try:
+        # Only downloads the 2 selected images (not 100!)
         img_a_bytes = crop_aligned_region(node_a['browse_image'], node_a['footprint'], user_bbox, offset_a)
         img_b_bytes = crop_aligned_region(node_b['browse_image'], node_b['footprint'], user_bbox, offset_b)
         stats = compute_hh_hv_stats(img_a_bytes, img_b_bytes)
@@ -281,8 +315,8 @@ Based on the two images and the measured HH/HV/VH metrics above, provide a conci
 4. **Takeaway:** 2-sentence summary of the environmental change."""
 
         contents = [
-            types.Part.from_bytes(data=img_a_bytes, mime_type="image/png"),
-            types.Part.from_bytes(data=img_b_bytes, mime_type="image/png"),
+            types.Part.from_bytes(data=img_a_bytes, mime_type="image/jpeg"),
+            types.Part.from_bytes(data=img_b_bytes, mime_type="image/jpeg"),
             prompt
         ]
 
@@ -320,17 +354,17 @@ def search_stream():
     @stream_with_context
     def generate():
         try:
-            yield send_event("validate", 10, f"Validating box for {product}...")
+            yield send_event("validate", 15, f"Validating box for {product}...")
             parts = [float(x) for x in bbox_raw.split(',')]
             if len(parts) != 4:
                 yield send_event("error", 100, "Invalid bounding box.")
                 return
 
             lon_min, lat_min, lon_max, lat_max = parts
-            lon_min = round(normalize_lon(lon_min), 5)
-            lon_max = round(normalize_lon(lon_max), 5)
-            lat_min = round(max(-85.0, min(85.0, lat_min)), 5)
-            lat_max = round(max(-85.0, min(85.0, lat_max)), 5)
+            lon_min = round(normalize_lon(lon_min), 4)
+            lon_max = round(normalize_lon(lon_max), 4)
+            lat_min = round(max(-85.0, min(85.0, lat_min)), 4)
+            lat_max = round(max(-85.0, min(85.0, lat_max)), 4)
 
             if lon_min > lon_max:
                 lon_min, lon_max = lon_max, lon_min
@@ -339,28 +373,32 @@ def search_stream():
 
             parts = [lon_min, lat_min, lon_max, lat_max]
             bbox_str = ",".join(map(str, parts))
+            cache_key = f"{product}:{bbox_str}"
 
-            yield send_event("query", 30, f"Querying NASA CMR for {product} passes...")
             t0 = time.time()
-            resp = requests.get(
-                "https://cmr.earthdata.nasa.gov/search/granules.json",
-                params={
-                    "provider": "ASF",
-                    "short_name[]": collections,
-                    "bounding_box": bbox_str,
-                    "page_size": 100,
-                    "sort_key": "start_date"
-                },
-                timeout=12
-            )
-            if resp.status_code != 200:
-                yield send_event("error", 100, f"NASA CMR Error ({resp.status_code}): {resp.text}")
-                return
+            entries = CMR_CACHE.get_item(cache_key)
+            if entries is None:
+                yield send_event("query", 45, f"Querying NASA CMR for {product}...")
+                resp = requests.get(
+                    "https://cmr.earthdata.nasa.gov/search/granules.json",
+                    params={
+                        "provider": "ASF",
+                        "short_name[]": collections,
+                        "bounding_box": bbox_str,
+                        "page_size": 100,
+                        "sort_key": "start_date"
+                    },
+                    timeout=10
+                )
+                if resp.status_code != 200:
+                    yield send_event("error", 100, f"NASA CMR Error ({resp.status_code}): {resp.text}")
+                    return
+                entries = resp.json().get("feed", {}).get("entry", [])
+                CMR_CACHE.set_item(cache_key, entries)
 
-            entries = resp.json().get("feed", {}).get("entry", [])
-            yield send_event("inspecting", 50, f"Checking radar pixel coverage across {len(entries)} passes...")
+            yield send_event("filtering", 80, f"Scoring swath geometry across {len(entries)} passes...")
 
-            raw_items = []
+            candidates = []
             for entry in entries:
                 low_res_url = pick_lowest_res_browse(entry.get("links", []))
                 if not low_res_url:
@@ -369,41 +407,29 @@ def search_stream():
                 coords = [float(x) for x in poly_str.split()]
                 footprint = [[coords[i], coords[i + 1]] for i in range(0, len(coords), 2)]
 
+                overlap_pct = fast_swath_overlap_pct(parts, footprint)
+                if overlap_pct == 0:
+                    continue
+
                 title = entry.get("title", "")
                 detected_type = product if product != "ALL" else next(
                     (p for p in ["GCOV", "GUNW", "GSLC", "GOFF", "RSLC"] if f"_{p}_" in title), "NISAR"
                 )
                 meta_info = parse_granule_metadata(title)
-                raw_items.append({
+                candidates.append({
                     "id": title,
                     "product_type": detected_type,
                     "orbit_dir": meta_info["orbit_dir"],
                     "pol_code": meta_info["pol_code"],
                     "pol_desc": meta_info["pol_desc"],
+                    "overlap_pct": overlap_pct,
                     "time": entry.get("time_start"),
                     "date_label": (entry.get("time_start") or "")[:10],
                     "browse_image": low_res_url,
                     "footprint": footprint
                 })
 
-            candidates = []
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                future_map = {
-                    pool.submit(measure_true_radar_pixel_coverage, parts, item["footprint"], item["browse_image"]): item
-                    for item in raw_items
-                }
-                completed, total = 0, max(1, len(future_map))
-                for future in as_completed(future_map):
-                    item = future_map[future]
-                    pct = future.result()
-                    completed += 1
-                    if pct > 0:
-                        item["overlap_pct"] = pct
-                        candidates.append(item)
-                    if completed % 5 == 0 or completed == total:
-                        yield send_event("inspecting", 50 + int((completed / total) * 40), f"Checked {completed}/{total} images...")
-
-            nodes = build_timeline_nodes(candidates, min_days_apart=12, max_nodes=18)
+            nodes = build_timeline_nodes(candidates, min_days_apart=12, max_nodes=16)
             elapsed = round(time.time() - t0, 2)
 
             yield send_event(
