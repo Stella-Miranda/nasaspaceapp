@@ -69,6 +69,33 @@ def compute_hh_hv_stats(img_a_bytes, img_b_bytes):
         "hv_before": hv_a, "hv_after": hv_b, "hv_delta": round(hv_b - hv_a, 1),
         "water_before": w_a, "water_after": w_b, "water_delta": round(w_b - w_a, 1),
     }
+
+def pick_lowest_res_browse(links):
+    """Picks the smallest, fastest-loading low-resolution browse thumbnail."""
+    candidates = []
+    for link in links:
+        href = link.get("href", "")
+        rel = link.get("rel", "")
+        if "browse#" in rel and href.lower().endswith((".jpg", ".jpeg", ".png")):
+            score = 0
+            lower = href.lower()
+            if "thumb" in lower or "small" in lower or "low" in lower:
+                score += 20
+            if lower.endswith((".jpg", ".jpeg")):
+                score += 10  # JPEGs are much smaller than full-res PNGs
+            if "high" in lower or "full" in lower or "large" in lower:
+                score -= 20
+            candidates.append((score, href))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda x: x[0], reverse=True)
+    return candidates[0][1]
+
+def normalize_lon(lon):
+    """Wraps any longitude (e.g., 1000 or -540) cleanly into [-180, 180]."""
+    return ((lon + 180.0) % 360.0) - 180.0
+
+
 PRODUCT_COLLECTIONS = {
     "GCOV": ["NISAR_L2_GCOV_PROVISIONAL_V1", "NISAR_L2_GCOV_BETA_V1"],
     "GUNW": ["NISAR_L2_GUNW_PROVISIONAL_V1", "NISAR_L2_GUNW_BETA_V1"],
@@ -334,6 +361,19 @@ def search_stream():
         try:
             yield send_event("validate", 10, f"Validating box for {product}...")
             parts = [float(x) for x in bbox_raw.split(',')]
+            lon_min, lat_min, lon_max, lat_max = parts
+            lon_min = round(normalize_lon(lon_min), 5)
+            lon_max = round(normalize_lon(lon_max), 5)
+            lat_min = round(max(-85.0, min(85.0, lat_min)), 5)
+            lat_max = round(max(-85.0, min(85.0, lat_max)), 5)
+
+            # Handle boxes that cross the antimeridian or were drawn backwards
+            if lon_min > lon_max:
+                lon_min, lon_max = lon_max, lon_min
+            if lat_min > lat_max:
+                lat_min, lat_max = lat_max, lat_min
+
+            parts = [lon_min, lat_min, lon_max, lat_max]
             if len(parts) != 4:
                 yield send_event("error", 100, "Invalid bounding box.")
                 return
@@ -366,8 +406,8 @@ def search_stream():
 
             raw_items = []
             for entry in entries:
-                hi_res_url = pick_highest_res_browse(entry.get("links", []))
-                if not hi_res_url:
+                low_res_url = pick_lowest_res_browse(entry.get("links", []))
+                if not low_res_url:
                     continue
                 poly_str = entry.get("polygons", [[""]])[0][0]
                 coords = [float(x) for x in poly_str.split()]
